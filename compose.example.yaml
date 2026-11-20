@@ -1,0 +1,21 @@
+# Example Dockge stack. Copy into Dockge and merge with your existing
+# OpenChamber settings (volumes, ports, env) — only the image line and the
+# Claude bits below are new.
+
+services:
+  openchamber:
+    image: ghcr.io/gitmastertape/openchamber-claude:latest
+    container_name: openchamber
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Keep all Claude Code config/login in one folder so a single volume persists it
+      - CLAUDE_CONFIG_DIR=/home/openchamber/.claude
+      # Optional: headless login — put the token in Dockge's .env box
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # Or use an API key instead:
+      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      # ...keep your existing OpenChamber/OpenCode volumes here...
+      - /mnt/app-pool/openchamber/claude:/home/openchamber/.claude
