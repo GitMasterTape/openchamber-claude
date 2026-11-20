@@ -1,7 +1,9 @@
 name: Build and publish
 
-# Rebuilds the image whenever a new arranhs/openchamber release or a new
-# Claude Code release comes out, and pushes it to GitHub Container Registry.
+# Builds OpenChamber from the official source (github.com/openchamber/openchamber)
+# using its own Dockerfile, adds Claude Code on top, and pushes the result to
+# GitHub Container Registry. Runs whenever there's a new OpenChamber release
+# or a new Claude Code release.
 
 on:
   schedule:
@@ -26,97 +28,127 @@ concurrency:
   group: build
   cancel-in-progress: false
 
+env:
+  UPSTREAM_REPO: openchamber/openchamber
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Look up latest versions
         id: versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          # Newest x.y.z tag of arranhs/openchamber on Docker Hub
-          oc=$(curl -fsSL "https://hub.docker.com/v2/repositories/arranhs/openchamber/tags?page_size=100&ordering=last_updated" \
-                | jq -r '.results[].name' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+          # Latest full (non-prerelease) OpenChamber release on GitHub
+          tag=$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq '.tag_name')
+          [ -n "$tag" ] || { echo "Couldn't read OpenChamber release"; exit 1; }
+          oc="${tag#v}"
+
+          # Commit the tag points to (dereferenced for annotated tags)
+          sha=$(git ls-remote --tags "https://github.com/${UPSTREAM_REPO}" "refs/tags/${tag}^{}" | cut -f1)
+          [ -n "$sha" ] || sha=$(git ls-remote --tags "https://github.com/${UPSTREAM_REPO}" "refs/tags/${tag}" | cut -f1)
 
           # Latest published Claude Code on npm
-          cc=$(curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code/latest" | jq -r '.version')
-
-          [ -n "$oc" ] && [ "$oc" != "null" ] || { echo "Couldn't read OpenChamber version"; exit 1; }
-          [ -n "$cc" ] && [ "$cc" != "null" ] || { echo "Couldn't read Claude Code version"; exit 1; }
+          cc=$(npm view @anthropic-ai/claude-code version)
+          [ -n "$cc" ] || { echo "Couldn't read Claude Code version"; exit 1; }
 
           prev_oc=$(jq -r '.openchamber // ""' versions.json 2>/dev/null || true)
           prev_cc=$(jq -r '.claude_code // ""' versions.json 2>/dev/null || true)
+          prev_sha=$(jq -r '.openchamber_commit // ""' versions.json 2>/dev/null || true)
 
           build=false
-          if [ "$oc" != "$prev_oc" ] || [ "$cc" != "$prev_cc" ]; then build=true; fi
+          if [ "$oc" != "$prev_oc" ] || [ "$cc" != "$prev_cc" ] || [ "$sha" != "$prev_sha" ]; then build=true; fi
           if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.force }}" = "true" ]; then build=true; fi
 
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openchamber-claude"
-
-          echo "OpenChamber: $prev_oc -> $oc"
+          echo "OpenChamber: $prev_oc -> $oc ($tag @ $sha)"
           echo "Claude Code: $prev_cc -> $cc"
           echo "Build: $build"
 
           {
+            echo "tag=$tag"
             echo "openchamber=$oc"
+            echo "commit=$sha"
             echo "claude_code=$cc"
             echo "build=$build"
-            echo "image=$image"
+            echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openchamber-claude"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Find the user the base image runs as
+      - name: Check out OpenChamber source
         if: steps.versions.outputs.build == 'true'
-        id: base
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ steps.versions.outputs.tag }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Verify source matches the release tag
+        if: steps.versions.outputs.build == 'true'
         run: |
           set -euo pipefail
-          docker pull --platform linux/amd64 "arranhs/openchamber:${{ steps.versions.outputs.openchamber }}"
-          user=$(docker image inspect -f '{{.Config.User}}' "arranhs/openchamber:${{ steps.versions.outputs.openchamber }}")
-          echo "Base image user: '${user:-root}'"
-          echo "user=${user:-root}" >> "$GITHUB_OUTPUT"
+          actual=$(git -C upstream rev-parse HEAD)
+          echo "Checked out: $actual"
+          echo "Release tag: ${{ steps.versions.outputs.commit }}"
+          [ "$actual" = "${{ steps.versions.outputs.commit }}" ] || { echo "Commit mismatch"; exit 1; }
 
-      - name: Log in to GHCR
+      - name: Build OpenChamber from source (official Dockerfile)
         if: steps.versions.outputs.build == 'true'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker build --platform linux/amd64 \
+            -t openchamber-upstream:local \
+            -f upstream/Dockerfile upstream
 
-      - name: Build and push
+      - name: Add Claude Code
         if: steps.versions.outputs.build == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          build-args: |
-            OPENCHAMBER_VERSION=${{ steps.versions.outputs.openchamber }}
-            CLAUDE_CODE_VERSION=${{ steps.versions.outputs.claude_code }}
-            BASE_USER=${{ steps.base.outputs.user }}
-          tags: |
-            ${{ steps.versions.outputs.image }}:latest
-            ${{ steps.versions.outputs.image }}:${{ steps.versions.outputs.openchamber }}
-            ${{ steps.versions.outputs.image }}:${{ steps.versions.outputs.openchamber }}-cc${{ steps.versions.outputs.claude_code }}
+        run: |
+          img="${{ steps.versions.outputs.image }}"
+          oc="${{ steps.versions.outputs.openchamber }}"
+          cc="${{ steps.versions.outputs.claude_code }}"
+          docker build --platform linux/amd64 \
+            --build-arg BASE_IMAGE=openchamber-upstream:local \
+            --build-arg CLAUDE_CODE_VERSION="$cc" \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.version="$oc" \
+            --label dev.openchamber.commit="${{ steps.versions.outputs.commit }}" \
+            -t "$img:latest" -t "$img:$oc" -t "$img:$oc-cc$cc" .
 
       - name: Smoke test
         if: steps.versions.outputs.build == 'true'
         run: |
-          docker run --rm --entrypoint claude "${{ steps.versions.outputs.image }}:latest" --version
+          set -euo pipefail
+          docker run --rm --entrypoint sh "${{ steps.versions.outputs.image }}:latest" -c \
+            'whoami && claude --version && test -f packages/web/build/bin/cli.js && echo OK'
+
+      - name: Push to GHCR
+        if: steps.versions.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          img="${{ steps.versions.outputs.image }}"
+          oc="${{ steps.versions.outputs.openchamber }}"
+          cc="${{ steps.versions.outputs.claude_code }}"
+          docker push "$img:$oc-cc$cc"
+          docker push "$img:$oc"
+          docker push "$img:latest"
 
       - name: Record built versions
         if: steps.versions.outputs.build == 'true'
         run: |
           set -euo pipefail
-          jq -n --arg oc "${{ steps.versions.outputs.openchamber }}" \
-                --arg cc "${{ steps.versions.outputs.claude_code }}" \
-                --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                '{openchamber: $oc, claude_code: $cc, built_at: $at}' > versions.json
+          jq -n --arg oc  "${{ steps.versions.outputs.openchamber }}" \
+                --arg sha "${{ steps.versions.outputs.commit }}" \
+                --arg cc  "${{ steps.versions.outputs.claude_code }}" \
+                --arg at  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '{openchamber: $oc, openchamber_commit: $sha, claude_code: $cc, built_at: $at}' > versions.json
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add versions.json
           if git diff --cached --quiet; then exit 0; fi
           git commit -m "Build OpenChamber ${{ steps.versions.outputs.openchamber }} + Claude Code ${{ steps.versions.outputs.claude_code }}"
+          git pull --rebase
           git push

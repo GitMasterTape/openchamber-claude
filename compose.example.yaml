@@ -1,6 +1,6 @@
-# Example Dockge stack. Copy into Dockge and merge with your existing
-# OpenChamber settings (volumes, ports, env) — only the image line and the
-# Claude bits below are new.
+# Example Dockge stack, based on OpenChamber's own docker-compose.yml.
+# Adjust the host paths under /mnt/app-pool/openchamber to match your datasets.
+# The datasets must be owned by UID/GID 1000 (the container's openchamber user).
 
 services:
   openchamber:
@@ -9,13 +9,21 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      # Keep all Claude Code config/login in one folder so a single volume persists it
+      # Required when exposing OpenChamber over the network — set it in Dockge's .env box
+      - OPENCHAMBER_UI_PASSWORD=${OPENCHAMBER_UI_PASSWORD:?Set OPENCHAMBER_UI_PASSWORD}
+      # Keep all Claude Code config/login in one folder so one volume persists it
       - CLAUDE_CONFIG_DIR=/home/openchamber/.claude
-      # Optional: headless login — put the token in Dockge's .env box
-      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
-      # Or use an API key instead:
-      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Pick one way for Claude Code to authenticate (also via Dockge's .env box):
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
     volumes:
-      # ...keep your existing OpenChamber/OpenCode volumes here...
-      - /mnt/app-pool/openchamber/claude:/home/openchamber/.claude
+      - /mnt/app-pool/openchamber/data/openchamber:/home/openchamber/.config/openchamber
+      - /mnt/app-pool/openchamber/data/opencode/share:/home/openchamber/.local/share/opencode
+      - /mnt/app-pool/openchamber/data/opencode/state:/home/openchamber/.local/state/opencode
+      - /mnt/app-pool/openchamber/data/opencode/config:/home/openchamber/.config/opencode
+      - /mnt/app-pool/openchamber/data/ssh:/home/openchamber/.ssh
+      - /mnt/app-pool/openchamber/data/claude:/home/openchamber/.claude
+      - /mnt/app-pool/openchamber/workspaces:/home/openchamber/workspaces
