@@ -1,6 +1,6 @@
 {
-  "openchamber": "2.7.3",
-  "openchamber_commit": "cf18602cc77146f35e26e103dbee1ab8e218b663",
+  "openchamber": "2.8.0",
+  "openchamber_commit": "30c70496a5ca0105e04e60a783964576973edc8f",
   "claude_code": "2.1.330",
-  "built_at": "2026-11-21T01:39:06Z"
+  "built_at": "2026-11-22T07:03:22Z"
 }
